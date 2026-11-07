@@ -73,19 +73,19 @@ def get_news(name, n=NEWS_PER_STOCK):
 
 
 def price_block(ticker, include_js):
-    """Return (html, ok)."""
+    """Return (html, summary). summary is None when prices failed."""
     try:
         df, cur = get_prices(ticker)
     except Exception as e:
         print(f"  {ticker}: price fetch failed: {e}", file=sys.stderr)
-        return '<p class="muted">No price data available today.</p>', False
+        return '<p class="muted">No price data available today.</p>', None
 
     closes = df["Close"].dropna()
     last = closes.iloc[-1]
     if cur == "GBp":
         cur = "GBp (pence)"
-    if len(closes) >= 2:
-        pct = (last / closes.iloc[-2] - 1) * 100
+    pct = (last / closes.iloc[-2] - 1) * 100 if len(closes) >= 2 else None
+    if pct is not None:
         cls = "up" if pct >= 0 else "down"
         change = f'<span class="{cls}">{pct:+.2f}%</span> on last close'
     else:
@@ -102,7 +102,7 @@ def price_block(ticker, include_js):
                       yaxis=dict(gridcolor="rgba(128,128,128,.2)"))
     chart = fig.to_html(full_html=False, include_plotlyjs="cdn" if include_js else False,
                         config={"displayModeBar": False, "responsive": True})
-    return head + chart, True
+    return head + chart, {"price": last, "cur": cur, "pct": pct}
 
 
 def news_block(name):
@@ -123,16 +123,30 @@ def news_block(name):
 
 def main():
     tickers = load_tickers()
-    cards, js_done, ok_count = [], False, 0
+    cards, rows, js_done, ok_count = [], [], False, 0
     for t, name in tickers:
         print(f"{t} ({name})")
-        prices, ok = price_block(t, include_js=not js_done)
-        if ok:
+        prices, info = price_block(t, include_js=not js_done)
+        anchor = "s-" + "".join(c if c.isalnum() else "-" for c in t.lower())
+        if info:
             js_done = True
             ok_count += 1
-        cards.append(f'<section class="card"><h2>{html.escape(name)} '
+            cur = info["cur"].replace(" (pence)", "")
+            price = f'{info["price"]:,.2f} <span class="muted">{html.escape(cur)}</span>'
+            if info["pct"] is None:
+                pct = '<span class="muted">–</span>'
+            else:
+                cls = "up" if info["pct"] >= 0 else "down"
+                pct = f'<span class="{cls}">{info["pct"]:+.2f}%</span>'
+        else:
+            price, pct = '<span class="muted">no data</span>', ""
+        rows.append(f'<tr><td><a href="#{anchor}">{html.escape(name)}</a>'
+                    f'<br><small class="muted">{html.escape(t)}</small></td>'
+                    f'<td class="num">{price}</td><td class="num">{pct}</td></tr>')
+        cards.append(f'<section class="card" id="{anchor}"><h2>{html.escape(name)} '
                      f'<small>{html.escape(t)}</small></h2>{prices}'
-                     f'<h3>Latest news</h3>{news_block(name)}</section>')
+                     f'<h3>Latest news</h3>{news_block(name)}'
+                     f'<p class="top"><a href="#">↑ Back to top</a></p></section>')
 
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%d %b %Y %H:%M UTC")
     page = f"""<!doctype html>
@@ -156,6 +170,14 @@ def main():
   h3 {{ font-size: 1em; margin: 12px 0 4px; }}
   .price {{ margin: 4px 0; }} .up {{ color: var(--up); }} .down {{ color: var(--down); }}
   .muted {{ color: var(--muted); }}
+  .summary {{ padding: 8px 12px; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: .95em; }}
+  th {{ text-align: left; color: var(--muted); font-weight: 600; font-size: .85em; padding: 6px 4px; }}
+  td {{ padding: 8px 4px; border-top: 1px solid rgba(128,128,128,.2); vertical-align: middle; }}
+  .num {{ text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }}
+  th.num {{ text-align: right; }}
+  html {{ scroll-behavior: smooth; }} section.card {{ scroll-margin-top: 12px; }}
+  .top {{ text-align: right; margin: 10px 0 0; font-size: .9em; }}
   ul {{ padding-left: 20px; margin: 0; }} li {{ margin: 6px 0; }}
   a {{ color: var(--link); text-decoration: none; }} a:hover {{ text-decoration: underline; }}
 </style>
@@ -163,6 +185,12 @@ def main():
 <body>
 <h1>Portfolio Dashboard</h1>
 <p class="muted">Updated {stamp}</p>
+<section class="card summary">
+<table>
+<thead><tr><th>Name</th><th class="num">Price</th><th class="num">Change</th></tr></thead>
+<tbody>{"".join(rows)}</tbody>
+</table>
+</section>
 {"".join(cards)}
 </body>
 </html>"""
