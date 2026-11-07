@@ -9,3 +9,4 @@ CSG.AS Czechoslovak Group
 BTC-USD Bitcoin
 AMZN Amazon
 DIS Disney
+META Meta Platforms
