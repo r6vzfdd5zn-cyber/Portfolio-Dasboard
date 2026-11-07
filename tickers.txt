@@ -7,3 +7,5 @@ RIO.L Rio Tinto
 COIN Coinbase
 CSG.AS Czechoslovak Group
 BTC-USD Bitcoin
+AMZN Amazon
+DIS Disney
