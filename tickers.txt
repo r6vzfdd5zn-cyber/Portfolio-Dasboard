@@ -10,3 +10,4 @@ BTC-USD Bitcoin
 AMZN Amazon
 DIS Disney
 META Meta Platforms
+CEZ.PR CEZ Group
