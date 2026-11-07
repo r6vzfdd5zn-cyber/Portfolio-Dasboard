@@ -6,3 +6,4 @@ NVDA Nvidia
 RIO.L Rio Tinto
 COIN Coinbase
 CSG.AS Czechoslovak Group
+BTC-USD Bitcoin
