@@ -1,0 +1,8 @@
+# Ticker  Company name (used for news search)
+AAPL Apple
+NFLX Netflix
+TSLA Tesla
+NVDA Nvidia
+RIO.L Rio Tinto
+COIN Coinbase
+CSG.AS Czechoslovak Group
