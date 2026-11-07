@@ -57,7 +57,67 @@ def get_prices(ticker):
 
     df = retry(fetch)
     cur = (tk.history_metadata or {}).get("currency", "")
-    return df, cur
+    return tk, df, cur
+
+
+def fmt_date(d):
+    return d.strftime("%-d %b %Y")
+
+
+def get_dividends(tk, last_price):
+    """Work out dividend facts from the stock's payment history.
+
+    Returns None if the stock has never paid a dividend. Dates in the
+    history are ex-dividend dates (you must own the stock before this day
+    to receive the payment).
+    """
+    divs = retry(lambda: tk.dividends)
+    if divs is None or divs.empty:
+        return None
+    divs = divs[divs > 0]
+    if divs.empty:
+        return None
+    dates = [ts.date() for ts in divs.index]
+    amounts = list(divs.values)
+    today = datetime.date.today()
+    year_ago = today - datetime.timedelta(days=365)
+
+    recent = [a for d, a in zip(dates, amounts) if d > year_ago]
+    per_year = sum(recent)
+    count = len(recent)
+    freq = {1: "once a year", 2: "twice a year", 4: "quarterly", 12: "monthly"}.get(
+        count, f"{count}× a year" if count else "")
+
+    info = {
+        "per_year": per_year,
+        "yield": per_year / last_price * 100 if last_price and per_year else 0,
+        "freq": freq,
+        "last_date": dates[-1],
+        "last_amt": amounts[-1],
+        "next_ex": None, "next_ex_announced": False, "next_pay": None,
+    }
+
+    # Dates the company has already announced (Yahoo's calendar).
+    try:
+        cal = tk.calendar or {}
+    except Exception:
+        cal = {}
+    ex = cal.get("Ex-Dividend Date")
+    pay = cal.get("Dividend Date")
+    if isinstance(ex, datetime.date) and ex >= today:
+        info["next_ex"], info["next_ex_announced"] = ex, True
+    if isinstance(pay, datetime.date) and pay >= today and (
+            not isinstance(ex, datetime.date) or pay >= ex):
+        info["next_pay"] = pay
+
+    # Otherwise estimate the next ex-date from the usual gap between payments.
+    if info["next_ex"] is None and len(dates) >= 3 and count:
+        gaps = sorted((b - a).days for a, b in zip(dates[-5:], dates[-4:]))
+        gap = gaps[len(gaps) // 2]
+        guess = dates[-1] + datetime.timedelta(days=gap)
+        if guess >= today:
+            info["next_ex"] = guess
+    return info
 
 
 def get_news(name, n=NEWS_PER_STOCK):
@@ -75,7 +135,7 @@ def get_news(name, n=NEWS_PER_STOCK):
 def price_block(ticker, include_js):
     """Return (html, summary). summary is None when prices failed."""
     try:
-        df, cur = get_prices(ticker)
+        tk, df, cur = get_prices(ticker)
     except Exception as e:
         print(f"  {ticker}: price fetch failed: {e}", file=sys.stderr)
         return '<p class="muted">No price data available today.</p>', None
@@ -102,7 +162,47 @@ def price_block(ticker, include_js):
                       yaxis=dict(gridcolor="rgba(128,128,128,.2)"))
     chart = fig.to_html(full_html=False, include_plotlyjs="cdn" if include_js else False,
                         config={"displayModeBar": False, "responsive": True})
-    return head + chart, {"price": last, "cur": cur, "pct": pct}
+    return head + chart, {"price": last, "cur": cur, "pct": pct, "tk": tk}
+
+
+def dividend_block(div, cur):
+    if div is None:
+        return '<p class="muted">Does not pay a dividend.</p>'
+    cur = html.escape(cur.replace(" (pence)", ""))
+    lines = []
+    if div["per_year"]:
+        lines.append(f'<b>{div["per_year"]:,.2f} {cur}</b> per share over the last 12 months'
+                     f' · <b>{div["yield"]:.2f}%</b> yield · paid {div["freq"]}')
+    else:
+        lines.append('<span class="muted">No dividend paid in the last 12 months.</span>')
+    lines.append(f'Last: {div["last_amt"]:,.2f} {cur} (ex-date {fmt_date(div["last_date"])})')
+    if div["next_ex"]:
+        if div["next_ex_announced"]:
+            lines.append(f'Next ex-date: <b>{fmt_date(div["next_ex"])}</b>')
+        else:
+            lines.append(f'Next ex-date: around <b>{div["next_ex"].strftime("%b %Y")}</b>'
+                         ' <span class="muted">(estimate)</span>')
+    if div["next_pay"]:
+        lines.append(f'Next payment: <b>{fmt_date(div["next_pay"])}</b>')
+    return '<ul class="div">' + "".join(f"<li>{l}</li>" for l in lines) + "</ul>"
+
+
+def calendar_block(events):
+    if not events:
+        return '<p class="muted">No dividend dates in the next 4 months.</p>'
+    rows = []
+    for d, name, anchor, kind, est in sorted(events, key=lambda e: e[0]):
+        when = d.strftime("%b %Y") if est else d.strftime("%-d %b")
+        if est:
+            when = f'~{when}'
+        rows.append(f'<tr><td class="nowrap">{when}</td>'
+                    f'<td><a href="#{anchor}">{html.escape(name)}</a></td>'
+                    f'<td class="num">{kind}</td></tr>')
+    return ('<table><thead><tr><th>Date</th><th>Name</th><th class="num">Event</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table>'
+            '<p class="note muted">Ex-date: you must own the share <i>before</i> this day to get '
+            'the next dividend. Payment: the day the money arrives. '
+            '~ means estimated from past payments.</p>')
 
 
 def news_block(name):
@@ -123,7 +223,8 @@ def news_block(name):
 
 def main():
     tickers = load_tickers()
-    cards, rows, js_done, ok_count = [], [], False, 0
+    cards, rows, events, js_done, ok_count = [], [], [], False, 0
+    horizon = datetime.date.today() + datetime.timedelta(days=120)
     for t, name in tickers:
         print(f"{t} ({name})")
         prices, info = price_block(t, include_js=not js_done)
@@ -140,11 +241,28 @@ def main():
                 pct = f'<span class="{cls}">{info["pct"]:+.2f}%</span>'
         else:
             price, pct = '<span class="muted">no data</span>', ""
+
+        divs_html = ""
+        if info:
+            try:
+                div = get_dividends(info["tk"], info["price"])
+            except Exception as e:
+                print(f"  {t}: dividend fetch failed: {e}", file=sys.stderr)
+                div, divs_html = None, '<p class="muted">Dividend data unavailable today.</p>'
+            if not divs_html:
+                divs_html = dividend_block(div, info["cur"])
+            if div:
+                if div["next_ex"] and div["next_ex"] <= horizon:
+                    events.append((div["next_ex"], name, anchor, "Ex-date",
+                                   not div["next_ex_announced"]))
+                if div["next_pay"] and div["next_pay"] <= horizon:
+                    events.append((div["next_pay"], name, anchor, "Payment", False))
         rows.append(f'<tr><td><a href="#{anchor}">{html.escape(name)}</a>'
                     f'<br><small class="muted">{html.escape(t)}</small></td>'
                     f'<td class="num">{price}</td><td class="num">{pct}</td></tr>')
         cards.append(f'<section class="card" id="{anchor}"><h2>{html.escape(name)} '
                      f'<small>{html.escape(t)}</small></h2>{prices}'
+                     f'<h3>Dividends</h3>{divs_html}'
                      f'<h3>Latest news</h3>{news_block(name)}'
                      f'<p class="top"><a href="#">↑ Back to top</a></p></section>')
 
@@ -178,6 +296,10 @@ def main():
   th.num {{ text-align: right; }}
   html {{ scroll-behavior: smooth; }} section.card {{ scroll-margin-top: 12px; }}
   .top {{ text-align: right; margin: 10px 0 0; font-size: .9em; }}
+  .nowrap {{ white-space: nowrap; }}
+  .note {{ font-size: .8em; margin: 8px 4px 2px; }}
+  h2.section {{ font-size: 1.1em; margin: 0 4px 6px; }}
+  ul.div {{ list-style: none; padding: 0; }}
   ul {{ padding-left: 20px; margin: 0; }} li {{ margin: 6px 0; }}
   a {{ color: var(--link); text-decoration: none; }} a:hover {{ text-decoration: underline; }}
 </style>
@@ -190,6 +312,10 @@ def main():
 <thead><tr><th>Name</th><th class="num">Price</th><th class="num">Change</th></tr></thead>
 <tbody>{"".join(rows)}</tbody>
 </table>
+</section>
+<section class="card summary">
+<h2 class="section">Dividend calendar</h2>
+{calendar_block(events)}
 </section>
 {"".join(cards)}
 </body>
